@@ -1,0 +1,419 @@
+---
+title: "IST687 Final Project"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+install.packages("pscl")
+install.packages("rsconnect")
+install.packages("shiny")
+install.packages("randomForest")
+library(tidyverse);library(arules);library(arulesViz);library(imputeTS);library(ggplot2);library(plotly);
+library(ggmap);library(mapproj);library(rworldmap);library(kernlab);library(caret);library(pscl);library(lmtest);
+library(rsconnect);library(shiny); library(randomForest)
+```
+
+## Importing Data
+
+```{r}
+dataFile <- "https://intro-datascience.s3.us-east-2.amazonaws.com/Resort01.csv"
+
+df <- read_csv(dataFile, show_col_types = FALSE)
+head(df)
+```
+
+##Adding calculated fields, normalizing data
+
+```{r}
+#creating group size category from Adults, Children, and Babies
+df$Adults[df$Adults==0 & df$Children==0 & df$Babies==0] <- NA
+df$Children[df$Adults==0 & df$Children==0 & df$Babies==0] <- NA
+df$Babies[df$Adults==0 & df$Children==0 & df$Babies==0] <- NA
+
+df$Adults <- na_interpolation(df$Adults)
+df$Children <- na_interpolation(df$Children)
+df$Babies <- na_interpolation(df$Babies)
+
+df$GroupSize <- df$Adults + df$Children + df$Babies
+df$GroupSizeCat <- ifelse(df$GroupSize >4, ">4", "<=4")  
+
+#creating stay length from StaysInWeekNights and StaysInWeekendNights
+df$StayLength <- df$StaysInWeekNights + df$StaysInWeekendNights
+df$StayLength[df$StayLength==0] <- NA
+
+df$StayLength <- ceiling(na_interpolation(df$StayLength))
+df$StayLengthCat <- ifelse(df$StayLength  >3, ">3", "<=3")
+
+df$GotWantedRoom <- ifelse(df$ReservedRoomType == df$AssignedRoomType, 1,0)
+df$NonRefundable <- ifelse(df$DepositType == "Non Refund", 1,0)
+
+#per the documentation Undefined and SC are the same
+df$Meal <- ifelse(df$Meal=="Undefined","SC",df$Meal)
+
+dfNumeric <- df %>% select(where(is.numeric))
+dfAssoc <- df %>% mutate_if(is.numeric,as.character)
+```
+
+## Summary statistics for all columns
+
+```{r}
+summary.data.frame(dfNumeric)
+```
+
+## Association rules
+
+```{r}
+
+dfTransactions <- as(dfAssoc, "transactions")
+
+head(itemFrequency(dfTransactions))
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+inspect(dfTransactions[1:10])
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.15, conf=0.5), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+
+
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:10])
+```
+## Various Association rules attempts
+All non-numeric columns
+
+```{r}
+
+dfTransactions <- as(dfAssoc[c(1,8,9,10,14,15,17,18)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.03, conf=0.8), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:10])
+```
+
+Group size, stay length (numerical)
+```{r}
+
+dfTransactions <- as(dfAssoc[c(1,21,22)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.00001, conf=0.5), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:10])
+```
+
+Group size, stay length (categorical)
+```{r}
+
+dfTransactions <- as(dfAssoc[c(1,23,24)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.000001, conf=0.01), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:9])
+```
+
+##Plots
+
+```{r}
+
+
+#Scatter Plots
+
+
+# Is there a relation between customer type , repeated guest and cancellation?
+g1 <- ggplot(df)+
+aes(x=IsCanceled, y=IsRepeatedGuest, color=CustomerType) +
+geom_point()
+g1
+
+# Is there a relation between Market Segment , repeated guest and cancellation?
+g2 <- ggplot(df)+
+aes(x=IsCanceled, y=IsRepeatedGuest , color= MarketSegment ) +
+geom_point()
+g2
+
+# Is there a relation between customer type , repeated guest and previous cancellation?
+g3 <- ggplot(df)+
+aes(x=PreviousCancellations, y=IsRepeatedGuest , color= CustomerType ) +
+geom_point()
+g3
+
+# Plots
+
+#Room preference by customer type
+ggplot(data=df,aes(CustomerType,fill=ReservedRoomType)) +geom_bar(stat="count",position = position_dodge())
+
+#Room preference by market segment
+ggplot(data=df,aes(MarketSegment,fill=ReservedRoomType)) +geom_bar(stat="count",position = position_dodge())
+
+# Reservation based on Meal
+ggplot(data = df,aes( x = Meal,fill = Meal,y = prop.table(stat(count)),
+                          label = scales::percent(prop.table(stat(count))))) +  geom_bar() + 
+  geom_text(stat = "count", position = position_dodge(1),vjust = 1, hjust=0,size = 3)+scale_y_continuous(labels = scales::percent) + coord_flip() +labs(title = "Bookings by Meal", x = "Meal type",y = "Number of bookings") +
+  geom_text(stat = "count", aes(label = ..count..), hjust = 5) 
+
+
+#Booking based on market segment
+ggplot(data = df,aes( x = MarketSegment,fill = MarketSegment,y = prop.table(stat(count)),
+                          label = scales::percent(prop.table(stat(count))))) +  geom_bar() + 
+  geom_text(stat = "count", position = position_dodge(1),vjust = 1, hjust=0,size = 3)+scale_y_continuous(labels = scales::percent) + coord_flip() +labs(title = "Bookings by Market Segment", x = "MS type",y = "Number of bookings") +
+  geom_text(stat = "count", aes(label = ..count..), hjust = 1) 
+
+
+#Customer Type and Booking
+ggplot(data = df,aes( x = CustomerType,fill = CustomerType,y = prop.table(stat(count)),
+                          label = scales::percent(prop.table(stat(count))))) +  geom_bar() + 
+  geom_text(stat = "count", position = position_dodge(1),vjust = 1, hjust=0,size = 3)+scale_y_continuous(labels = scales::percent) + coord_flip() +labs(title = "Booking by Customer Type", x = "Customer type",y = "Number of bookings") +
+  geom_text(stat = "count", aes(label = ..count..), hjust = 1) 
+
+
+#Cancellation and Booking
+ggplot(data = df,aes( x =IsCanceled,fill = IsCanceled,y = prop.table(stat(count)),
+                          label = scales::percent(prop.table(stat(count))))) +  geom_bar() + 
+  geom_text(stat = "count", position = position_dodge(1),vjust = 1, hjust=0,size = 3)+scale_y_continuous(labels = scales::percent) + coord_flip() +labs(title = "Booking by Cancellation", x = "Cancellation",y = "Number of bookings") +
+  geom_text(stat = "count", aes(label = ..count..), hjust = 1) 
+
+## # Interactive Bar Plot for country
+country_table <- df %>%
+  count(Country)
+
+country_table %>%
+  mutate(Country = fct_reorder(Country, n, .desc = TRUE)) %>%
+  plot_ly(x = ~Country, y = ~n) %>% 
+  add_bars()  
+country_table
+
+#EDA
+
+#Online market segment's cancellation is more
+#Online TA	17729	
+df%>% group_by(MarketSegment)  %>% summarise(length(IsCanceled))
+
+#Couples booking cancellation is more
+#2	31432	
+df%>% group_by(df$Adults)  %>% summarise(length(IsCanceled))
+
+#1 night booking cancellations are more
+#1	7790	
+df%>% group_by(df$StayLength)  %>% summarise(length(IsCanceled))
+
+#'A' type room cancellation is higher
+#A	23399	
+df %>% group_by(ReservedRoomType)  %>% summarise(length(IsCanceled))
+
+#'A' type room cancellation is higher
+#A	17046	
+df %>% group_by(df$AssignedRoomType)  %>% summarise(length(IsCanceled))
+
+#customer with no deposit cancellation is higher
+#No Deposit	38199	
+df %>% group_by(df$DepositType)  %>% summarise(length(IsCanceled))
+
+#Non repeated guests has more cancellations
+#0	38282	
+df %>% group_by(df$IsRepeatedGuest)  %>% summarise(length(IsCanceled))
+
+visitedMap <- joinCountryData2Map(df,
+joinCode = "ISO3",
+nameJoinColumn = "Country",
+nameCountryColumn = "Country",
+mapResolution="coarse" ,
+verbose = FALSE
+)
+par(mai=c(0,0,0.2,0),xaxs="i",yaxs="i")
+mapParams <- mapCountryData(visitedMap,
+nameColumnToPlot="Country",
+oceanCol = "azure2",
+missingCountryCol = gray(.8),
+addLegend = F,
+mapTitle = "Hotel Cancelations Across Countries",
+catMethod='categorical')
+
+
+```
+
+#Previous cancellations, repeated guests, deposit type, group size, stay length
+```{r}
+
+dfTransactions <- as(dfAssoc[c(1,12,17,23,24)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.006, conf=0.5), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:10])
+```
+
+#Market segment, deposit type, customer type
+```{r}
+dfTransactions <- as(dfAssoc[c(1,10,17,18)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.006, conf=0.5), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:5])
+```
+
+#Babies, children, deposit, group size categorical, stay length categorical
+```{r}
+
+dfTransactions <- as(dfAssoc[c(1,6,7,17,23,24)], "transactions")
+
+itemFrequencyPlot(dfTransactions, topN = 25)
+
+ruleset <- apriori(dfTransactions,
+                   parameter=list(supp=0.01, conf=0.90), 
+                   control=list(verbose=F), 
+                   appearance=list(default="lhs",rhs=("IsCanceled=1")))
+plot(ruleset)
+rulesbysupport <- sort(ruleset, decreasing = TRUE, by = "support")
+inspect(rulesbysupport[1:10])
+```
+
+
+##Boxplots
+
+```{r}
+
+for(j in names(dfNumeric)){
+  boxplot(df[[j]] ~ df[[1]], main = paste("Boxplot of",j), xlab = "IsCanceled",ylab=j)
+}
+```
+
+##Barplots
+
+```{r}
+for (k in names(df)){
+  counts <- table(df[[1]],df[[k]])
+  barplot(counts, main = paste("Barplot of",k), xlab = k, 
+          col = c("Blue","Orange"), legend = rownames(counts),beside = TRUE)
+}
+```
+
+
+
+#Linear Model
+```{r}
+mylm<-lm(IsCanceled~LeadTime+StayLength+Adults+Children+IsRepeatedGuest+PreviousCancellations+BookingChanges+RequiredCarParkingSpaces+TotalOfSpecialRequests+GotWantedRoom+NonRefundable,df) 
+summary(mylm) #low R squared. Linear model, not good to predict a categorical value
+```
+
+#Logistic Regression 1
+```{r}
+mylogit<-glm(IsCanceled~LeadTime+StayLength+Adults+Children+IsRepeatedGuest+PreviousCancellations+PreviousBookingsNotCanceled+BookingChanges+RequiredCarParkingSpaces+TotalOfSpecialRequests,data=df,family='binomial')
+summary(mylogit) 
+```
+
+
+#Logistic Regression 2
+```{r}
+mylogit2<-glm(IsCanceled~LeadTime+StayLength+Adults+Children+IsRepeatedGuest+PreviousCancellations+PreviousBookingsNotCanceled+BookingChanges+TotalOfSpecialRequests,data=df,family='binomial')
+summary(mylogit2)
+```
+
+
+#To determine the better model
+```{r}
+
+pR2(mylogit) #look at the McFadden R^2. The 1st logit has a higher psuedo R^2
+pR2(mylogit2)
+
+```
+
+#Likelihood Ratio Test
+```{r}
+lrtest(mylogit,mylogit2) #can reject the null, that the second model has a better fit 
+```
+
+
+##SVM
+
+```{r}
+df %>% mutate(IsCanceled = as.factor(IsCanceled)) -> df
+trainListHotel <- createDataPartition(y=df$IsCanceled, p=.60, list=FALSE)
+trainSetHotel <- data.frame(df[trainListHotel,])
+testSetHotel <- data.frame(df[-trainListHotel,])
+
+
+svm_model <- ksvm(IsCanceled ~ LeadTime + StaysInWeekendNights + StaysInWeekNights + Adults + Children + Babies + IsRepeatedGuest + PreviousCancellations + PreviousBookingsNotCanceled + BookingChanges + RequiredCarParkingSpaces + TotalOfSpecialRequests, data=trainSetHotel,prob.model = TRUE,kernel= "rbfdot", kpar = "automatic",C = 5,cross = 3)
+
+svm_model
+
+svmPred <- predict(svm_model, newdata = testSetHotel,type = "response")
+table(testSetHotel$IsCanceled,svmPred)
+confusionMatrix(svmPred, testSetHotel$IsCanceled) 
+
+svm_model2 <- ksvm(IsCanceled ~ LeadTime + StaysInWeekendNights + StaysInWeekNights + Adults + Children + Babies + IsRepeatedGuest + PreviousCancellations + PreviousBookingsNotCanceled + BookingChanges + RequiredCarParkingSpaces + TotalOfSpecialRequests + StayLength + GotWantedRoom + NonRefundable + GroupSize, data=trainSetHotel, kpar="automatic",kernel= "rbfdot",prob.model = TRUE,C = 5, cross = 3)
+
+svm_model2
+
+svmPred2 <- predict(svm_model2, newdata = testSetHotel,type = "response")
+table(testSetHotel$IsCanceled,svmPred2)
+confusionMatrix(svmPred2, testSetHotel$IsCanceled)  
+```
+
+#ShinyApp
+```{r eval=FALSE, echo=FALSE}
+
+rsconnect::setAccountInfo(name='emanijones', token='3E07F941CA980805DDA56CCD911234BD', secret='o+fiJm1tCIlGVic6GmrqDqL8XRzO9Vypx2j3mVm9')
+
+ui <- fluidPage(
+  titlePanel("Probability a Customer Cancels"),
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("LeadTime","Lead Time",0 ),
+      numericInput("StayLength","Stay Length",0),
+       numericInput("Adults","How Many Adults",0),
+      numericInput("Children","How Many Children",0),
+      numericInput("IsRepeatedGuest","Is this a Repeated Guest:Yes=1, No=0",0),
+      numericInput("PreviousCancellations","How Many Times Has the Customer Cancelled Before",0),
+      numericInput("PreviousBookingsNotCanceled","Previous Bookings Not Canceled",0),
+      numericInput("BookingChanges", "Number of Booking Changes",0),
+      numericInput("RequiredCarParkingSpaces","How Many Parking Spaces Are Needed",0),
+      numericInput("TotalOfSpecialRequests","Total Of Special Requests",0)
+     
+    ),
+    mainPanel(textOutput("cancelprob")
+      
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  preddftry<-predDF<-reactive(data.frame("LeadTime"=input$LeadTime,"StayLength" = input$StayLength,"Adults"=input$Adults,"Children"=input$Children,"IsRepeatedGuest"=input$IsRepeatedGuest,"PreviousCancellations"=input$PreviousCancellations,"PreviousBookingsNotCanceled"=input$PreviousBookingsNotCanceled,"BookingChanges"=input$BookingChanges,"RequiredCarParkingSpaces"=input$RequiredCarParkingSpaces,"TotalOfSpecialRequests"=input$TotalOfSpecialRequests))
+  outputprediction <- reactive({predict(mylogit, preddftry(),type='response')})
+  output$cancelprob<- renderText(outputprediction())
+  
+}
+
+shinyApp(ui, server)
+```
